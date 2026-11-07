@@ -12,6 +12,33 @@ import (
 	"vocat/internal/vowifi"
 )
 
+func TestUSSISDPRtpmapsCarryClockRate(t *testing.T) {
+	sdp := string(buildUSSISDP(net.ParseIP("192.0.2.1")))
+	for _, line := range strings.Split(sdp, "\r\n") {
+		if strings.HasPrefix(line, "a=rtpmap:") && !strings.Contains(line, "/") {
+			t.Fatalf("rtpmap without clock rate: %q", line)
+		}
+	}
+	for _, want := range []string{"a=rtpmap:97 AMR/8000/1\r\n", "a=rtpmap:96 telephone-event/8000\r\n"} {
+		if !strings.Contains(sdp, want) {
+			t.Fatalf("USSI SDP missing %q:\n%s", want, sdp)
+		}
+	}
+}
+
+func TestUSSIRejectedErrorKeepsReasonAndWarning(t *testing.T) {
+	err := ussiRejectedError(&sipResponse{StatusCode: 606, Reason: "Not Acceptable", Headers: map[string][]string{
+		"warning": {`399 anonymous.invalid "Transient failure or protocol error (Diameter)"`},
+	}})
+	want := `ims: USSI rejected with SIP 606 (Not Acceptable; Warning: 399 anonymous.invalid "Transient failure or protocol error (Diameter)")`
+	if err.Error() != want {
+		t.Fatalf("error = %q, want %q", err, want)
+	}
+	if got := ussiRejectedError(&sipResponse{StatusCode: 488}).Error(); got != "ims: USSI rejected with SIP 488" {
+		t.Fatalf("bare error = %q", got)
+	}
+}
+
 func TestUSSDXMLSerializationAndParsing(t *testing.T) {
 	// 1. Build and parse basic XML
 	xmlData := buildUSSDXML("*123#", "en")

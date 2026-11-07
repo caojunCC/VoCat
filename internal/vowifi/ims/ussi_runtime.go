@@ -166,12 +166,31 @@ func buildUSSISDP(localIP net.IP) []byte {
 			"c=IN %s %s\r\n"+
 			"t=0 0\r\n"+
 			"m=audio 0 RTP/AVP 97 96\r\n"+
-			"a=rtpmap:97 AMR\r\n"+
+			// RFC 4566 requires "<encoding name>/<clock rate>" in rtpmap;
+			// Vodafone UK's P-CSCF rejects the bare names with 488.
+			"a=rtpmap:97 AMR/8000/1\r\n"+
 			"a=fmtp:97 mode-set=0,2,5,7; maxframes=2\r\n"+
-			"a=rtpmap:96 telephone-event\r\n",
+			"a=rtpmap:96 telephone-event/8000\r\n",
 		now, now, addrType, ipStr, addrType, ipStr,
 	)
 	return []byte(sdp)
+}
+
+// ussiRejectedError keeps the network's reason phrase and Warning header (for
+// example "SDP Parameter Error In SIP Request" or a Diameter failure) so a
+// rejected USSI request can be diagnosed from the logs.
+func ussiRejectedError(response *sipResponse) error {
+	detail := strings.TrimSpace(response.Reason)
+	if warning := strings.TrimSpace(response.value("Warning")); warning != "" {
+		if detail != "" {
+			detail += "; "
+		}
+		detail += "Warning: " + warning
+	}
+	if detail = safeSIPDiagnostic(detail); detail == "" {
+		return fmt.Errorf("ims: USSI rejected with SIP %d", response.StatusCode)
+	}
+	return fmt.Errorf("ims: USSI rejected with SIP %d (%s)", response.StatusCode, detail)
 }
 
 func buildUSSIMultipartBody(sdp []byte, xmlBody []byte, boundary string) []byte {
@@ -552,7 +571,7 @@ func (session *Session) sendUSSIInvite(ctx context.Context, dialstring string) (
 		session.ussiMu.Lock()
 		delete(session.ussiDialogs, callID)
 		session.ussiMu.Unlock()
-		return nil, response, fmt.Errorf("ims: USSI rejected with SIP %d", response.StatusCode)
+		return nil, response, ussiRejectedError(response)
 	}
 
 	// Update dialog from 200 OK
@@ -894,7 +913,7 @@ func (session *Session) sendUSSIStandaloneMessage(ctx context.Context, request v
 		result.SubmissionStatus = "rejected_by_ims"
 		result.Status = "failed"
 		result.Raw = strings.ToUpper(hex.EncodeToString(message))
-		return result, fmt.Errorf("ims: USSI rejected with SIP %d", response.StatusCode)
+		return result, ussiRejectedError(response)
 	}
 	text, replyDCS := session.parseUSSIReply(response)
 	result.Text = text
