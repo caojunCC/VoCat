@@ -215,7 +215,14 @@ func (session *Session) watchOutgoingCall(call *imsCall, key sipTransactionKey) 
 			}
 			if response.StatusCode >= 200 && response.StatusCode < 300 {
 				session.updateCallDialogFromResponse(call, response)
-				mediaErr := call.media.configureRemote(response.Body)
+				// RFC 3262/3264: the SDP answer may already have arrived in a
+				// reliable provisional response (183 + PRACK). Cores such as
+				// Vodafone UK then send a 2xx without a body; that must not fail
+				// an otherwise established call.
+				var mediaErr error
+				if len(response.Body) > 0 || !call.media.ready() {
+					mediaErr = call.media.configureRemote(response.Body)
+				}
 				_ = session.sendACK(call)
 				if mediaErr != nil {
 					session.finishCall(call.callID, "failed", response.StatusCode, mediaErr.Error())

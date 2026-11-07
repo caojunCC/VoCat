@@ -171,6 +171,62 @@ func TestCancelledOutgoingInviteDoesNotBecomeFailedOn487(t *testing.T) {
 	t.Fatal("cancelled INVITE did not reach a terminal state")
 }
 
+// Vodafone UK answers the SDP offer in a 183 and then sends a 200 OK without a
+// body. The call must become active instead of being failed and torn down.
+func TestOutgoingCallAcceptsBodylessOKAfterProvisionalSDPAnswer(t *testing.T) {
+	client, peer := net.Pipe()
+	defer client.Close()
+	defer peer.Close()
+	go func() { _, _ = io.Copy(io.Discard, peer) }() // drain ACK / BYE writes
+
+	media, err := newRTPMedia(net.IPv4(127, 0, 0, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer media.Close()
+	call := &imsCall{
+		public:    vowifi.Call{ID: "outgoing", State: "dialing", Direction: "outgoing"},
+		callID:    "outgoing",
+		target:    "sip:+447700900002@example.test",
+		from:      "<sip:subscriber@example.test>;tag=local",
+		responses: make(chan *sipResponse, 2),
+		media:     media,
+	}
+	session := &Session{
+		calls:          map[string]*imsCall{call.callID: call},
+		transactions:   make(map[sipTransactionKey]chan *sipResponse),
+		refreshContext: context.Background(),
+		conn:           client,
+		transport:      "udp",
+		identity:       identitySet{user: "subscriber"},
+	}
+	go session.watchOutgoingCall(call, sipTransactionKey{callID: call.callID, cseq: 1, method: "INVITE"})
+
+	answer := strings.Join([]string{
+		"v=0", "o=- 1 1 IN IP4 127.0.0.1", "s=-", "c=IN IP4 127.0.0.1", "t=0 0",
+		"m=audio 40000 RTP/AVP 8 100", "a=rtpmap:8 PCMA/8000", "a=rtpmap:100 telephone-event/8000", "",
+	}, "\r\n")
+	call.responses <- &sipResponse{StatusCode: 183, Reason: "Session Progress",
+		Headers: map[string][]string{"content-type": {"application/sdp"}}, Body: []byte(answer)}
+	call.responses <- &sipResponse{StatusCode: 200, Reason: "OK", Headers: map[string][]string{}}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		calls := session.Calls()
+		if len(calls) == 1 && calls[0].State == "active" {
+			if !calls[0].MediaReady || calls[0].Codec != "PCMA" {
+				t.Fatalf("active call media = %#v", calls[0])
+			}
+			return
+		}
+		if len(calls) == 1 && calls[0].State == "failed" {
+			t.Fatalf("bodyless 200 OK failed the call: %#v", calls[0])
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("call never became active: %#v", session.Calls())
+}
+
 func TestValidCallNumber(t *testing.T) {
 	if !validCallNumber("+447700900000") || validCallNumber("12\r\nBYE") {
 		t.Fatal("call number validation mismatch")
