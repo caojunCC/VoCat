@@ -45,19 +45,24 @@ def version_info(allow_dirty):
 
 
 def patched_dockerfile(text, mirror, goproxy, npm_registry):
-    out = []
+    out, stages = [], set()
     for line in text.splitlines():
         if mirror and line.startswith("# syntax=docker/"):
             line = line.replace("# syntax=", f"# syntax={mirror}/", 1)
         match = re.match(r"^(FROM\s+(?:--platform=\S+\s+)?)(\S+)(.*)$", line)
         if mirror and match:
             image = match.group(2)
-            first = image.split("/")[0]
-            if "." not in first and ":" not in first and first != "localhost" and not image.startswith("$"):
-                if "/" not in image:
+            first, slash, _ = image.partition("/")
+            # Only a first path component can name a registry (host.tld, host:port).
+            has_registry = slash and ("." in first or ":" in first or first == "localhost")
+            if not has_registry and not image.startswith("$") and image.lower() not in stages:
+                if not slash:
                     image = "library/" + image
                 line = f"{match.group(1)}{mirror}/{image}{match.group(3)}"
         out.append(line)
+        stage = re.search(r"\bAS\s+(\S+)\s*$", line, re.I) if match else None
+        if stage:
+            stages.add(stage.group(1).lower())
         if match and re.search(r"\bAS\s+go-builder\b", line, re.I) and goproxy:
             out.append(f"ENV GOPROXY={goproxy}")
         if match and re.search(r"\bAS\s+web-builder\b", line, re.I) and npm_registry:
